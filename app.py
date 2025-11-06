@@ -828,5 +828,5 @@ with gr.Blocks(theme=custom_theme, css=css) as demo:
         api_name="generate_explanation",
     )
 
-# demo.queue()
+demo.queue()
 # demo.launch(debug=True, share=True)
