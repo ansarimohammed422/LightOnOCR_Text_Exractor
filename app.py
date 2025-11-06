@@ -792,7 +792,11 @@ with gr.Blocks(theme=custom_theme, css=css) as demo:
 
     with gr.Row():
         with gr.Column(scale=1):
-            input_files = gr.Files(label="Upload Images or PDFs")
+            # input_files = gr.Files(label="Upload Images or PDFs")
+            input_files = gr.Files(
+                label="Upload Images or PDFs",
+                file_types=["image", ".pdf", ".png", ".jpg", ".jpeg", ".webp"],
+            )
             text_input = gr.Textbox(
                 label="Your Query",
                 placeholder="e.g., Extract the total amount from this receipt.",
@@ -813,7 +817,6 @@ with gr.Blocks(theme=custom_theme, css=css) as demo:
                 label="Detailed Explanation", elem_id="explanation-box"
             )
 
-    # Add api_name to create stable API endpoints
     submit_btn.click(
         fn=run_inference,
         inputs=[input_files, text_input],
