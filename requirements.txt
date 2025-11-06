@@ -9,3 +9,6 @@ qwen-vl-utils
 gradio
 PyMuPDF
 spaces
+openai
+bitsandbytes
+accelerate
