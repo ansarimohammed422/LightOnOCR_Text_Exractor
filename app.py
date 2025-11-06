@@ -513,6 +513,7 @@
 import gradio as gr
 import spaces
 from gradio.themes.base import Base
+import uvicorn
 
 # --- Imports for 4-bit Quantization ---
 import torch
@@ -830,3 +831,5 @@ with gr.Blocks(theme=custom_theme, css=css) as demo:
 
 demo.queue()
 # demo.launch(debug=True, share=True)
+if __name__ == "__main__":
+    uvicorn.run(demo, host="127.0.0.1", port=7860)
