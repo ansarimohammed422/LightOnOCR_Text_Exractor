@@ -832,4 +832,4 @@ with gr.Blocks(theme=custom_theme, css=css) as demo:
 demo.queue()
 # demo.launch(debug=True, share=True)
 if __name__ == "__main__":
-    uvicorn.run(demo, host="127.0.0.1", port=7860)
+    demo.launch(server_name="127.0.0.1", server_port=7860)
