@@ -845,9 +845,9 @@ import json
 import os
 from datetime import datetime
 
-# --- MEMORY OPTIMIZATION SETTINGS (MUST BE AT THE TOP) ---
-# Helps prevent memory fragmentation errors on low-VRAM cards
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+# --- MEMORY OPTIMIZATION SETTINGS ---
+# Updated variable name based on your warning log
+os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
 import fitz  # PyMuPDF
 import gradio as gr
@@ -879,9 +879,8 @@ custom_theme = CustomTheme()
 DESCRIPTION = "A powerful vision-language model (Optimized for 8GB VRAM)."
 
 # --- CRITICAL CONFIG FOR 8GB GPU ---
-# Reduced from 1250 to 768. This is the only way to fit in 8GB VRAM.
 MAX_IMAGE_SIZE = 768
-MAX_NEW_TOKENS = 1024  # Reduced from 2048 to save memory
+MAX_NEW_TOKENS = 1024
 
 
 def array_to_image_path(image_filepath):
@@ -891,11 +890,9 @@ def array_to_image_path(image_filepath):
     img = Image.open(image_filepath)
     width, height = img.size
 
-    # Aggressively resize to prevent OOM
     if width > MAX_IMAGE_SIZE or height > MAX_IMAGE_SIZE:
         img.thumbnail((MAX_IMAGE_SIZE, MAX_IMAGE_SIZE))
 
-    # Save to a temporary path
     base, ext = os.path.splitext(image_filepath)
     new_path = f"{base}_processed{ext}"
     img.save(new_path)
@@ -904,13 +901,11 @@ def array_to_image_path(image_filepath):
 
 
 def convert_pdf_to_images(pdf_path):
-    """Opens a PDF and converts each page into a PNG image."""
     image_paths = []
     doc = fitz.open(pdf_path)
     base_name = os.path.splitext(os.path.basename(pdf_path))[0]
 
     for i, page in enumerate(doc):
-        # Reduced DPI from 200 to 100 to save memory
         pix = page.get_pixmap(dpi=100)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         image_path = f"{base_name}_page_{i + 1}_{timestamp}.png"
@@ -934,23 +929,21 @@ print("Loading Qwen2-VL 4-bit quantized model...")
 model = Qwen2VLForConditionalGeneration.from_pretrained(
     "Qwen/Qwen2-VL-7B-Instruct",
     quantization_config=quantization_config,
-    device_map="auto",
+    # --- FIX FOR META TENSOR ERROR ---
+    device_map={"": "cuda"},
+    # ---------------------------------
     attn_implementation="eager",
 )
 print("Model loaded successfully.")
 
 # --- 3. Strict Processor Limits ---
-# max_pixels limit ensures the model never sees an image too big for 8GB VRAM
 processor = AutoProcessor.from_pretrained(
-    "Qwen/Qwen2-VL-7B-Instruct",
-    min_pixels=256 * 28 * 28,
-    max_pixels=640 * 28 * 28,  # Capped at roughly 640x640 resolution internally
+    "Qwen/Qwen2-VL-7B-Instruct", min_pixels=256 * 28 * 28, max_pixels=640 * 28 * 28
 )
 
 
 @spaces.GPU
 def run_inference(uploaded_files, text_input):
-    # Aggressive cleanup
     torch.cuda.empty_cache()
     gc.collect()
 
@@ -967,7 +960,6 @@ def run_inference(uploaded_files, text_input):
 
     image_paths_to_process = []
 
-    # Process inputs
     for file_obj in uploaded_files:
         file_path = file_obj.name
         temp_files_to_clean.append(file_path)
@@ -983,7 +975,6 @@ def run_inference(uploaded_files, text_input):
 
     for image_file in image_paths_to_process:
         try:
-            # Resize image first
             image_path, width, height = array_to_image_path(image_file)
             if image_path != image_file:
                 temp_files_to_clean.append(image_path)
@@ -995,8 +986,6 @@ def run_inference(uploaded_files, text_input):
                         {
                             "type": "image",
                             "image": image_path,
-                            # Processor handles resizing via max_pixels,
-                            # we just pass the file path
                         },
                         {"type": "text", "text": json_prompt},
                     ],
@@ -1016,7 +1005,6 @@ def run_inference(uploaded_files, text_input):
                 return_tensors="pt",
             ).to("cuda")
 
-            # Reduced max_new_tokens to prevent OOM during generation
             generated_ids = model.generate(**inputs, max_new_tokens=MAX_NEW_TOKENS)
 
             generated_ids_trimmed = [
@@ -1030,7 +1018,6 @@ def run_inference(uploaded_files, text_input):
             )
             raw_text = raw_output[0]
 
-            # JSON Parsing Logic
             try:
                 start_index = raw_text.find("{")
                 end_index = raw_text.rfind("}") + 1
@@ -1051,12 +1038,10 @@ def run_inference(uploaded_files, text_input):
         except Exception as e:
             results.append(f'{{"error": "Processing Error", "details": "{str(e)}"}}')
 
-        # Cleanup tensors immediately
         del inputs, generated_ids, image_inputs
         torch.cuda.empty_cache()
         gc.collect()
 
-    # File cleanup
     for f in temp_files_to_clean:
         if os.path.exists(f):
             try:
@@ -1071,7 +1056,6 @@ def run_inference(uploaded_files, text_input):
 
 @spaces.GPU
 def generate_explanation(json_text):
-    # Cleanup before starting explanation
     torch.cuda.empty_cache()
     gc.collect()
 
