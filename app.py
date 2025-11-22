@@ -860,7 +860,7 @@ from qwen_vl_utils import process_vision_info
 from transformers import (
     AutoProcessor,
     BitsAndBytesConfig,
-    Qwen2_5_VLForConditionalGeneration,  # NOTE: Updated class for Qwen2.5
+    Qwen2VLForConditionalGeneration,  # Back to Qwen2-VL class
 )
 
 
@@ -919,21 +919,19 @@ quantization_config = BitsAndBytesConfig(
 )
 
 # --- 2. Initialize the Model and Processor with 4-bit Config ---
-print("Loading Qwen2.5-VL 4-bit quantized model...")
-model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-    "Qwen/Qwen2.5-VL-7B-Instruct",
+print("Loading Qwen2-VL 4-bit quantized model...")
+model = Qwen2VLForConditionalGeneration.from_pretrained(
+    "Qwen/Qwen2-VL-7B-Instruct",  # Back to Qwen2-VL
     quantization_config=quantization_config,
     device_map="auto",
-    attn_implementation="flash_attention_2",  # Helps prevent OOM if your GPU supports it
+    attn_implementation="flash_attention_2",  # Critical for memory saving
 )
 print("Model loaded successfully on GPU.")
 
-# NOTE: max_pixels is the critical fix for OOM.
-# It limits the model's visual token usage regardless of input image size.
+# NOTE: I added max_pixels here. This is the main fix for your OOM error.
+# It ensures that even if your image is 1250x1750, the model won't create too many tokens.
 processor = AutoProcessor.from_pretrained(
-    "Qwen/Qwen2.5-VL-7B-Instruct",
-    min_pixels=256 * 28 * 28,
-    max_pixels=1280 * 28 * 28,  # Limits internal resolution to ~1MP to prevent OOM
+    "Qwen/Qwen2-VL-7B-Instruct", min_pixels=256 * 28 * 28, max_pixels=1024 * 28 * 28
 )
 
 
@@ -990,7 +988,6 @@ def run_inference(uploaded_files, text_input):
     for image_file in image_paths_to_process:
         try:
             image_path, width, height = array_to_image_path(image_file)
-            # Add processed file to cleanup list
             if image_path != image_file:
                 temp_files_to_clean.append(image_path)
 
@@ -1001,6 +998,8 @@ def run_inference(uploaded_files, text_input):
                         {
                             "type": "image",
                             "image": image_path,
+                            "resized_height": height,
+                            "resized_width": width,
                         },
                         {"type": "text", "text": json_prompt},
                     ],
@@ -1032,17 +1031,10 @@ def run_inference(uploaded_files, text_input):
             raw_text = raw_output[0]
 
             try:
-                # Basic cleaning for Qwen2.5 which sometimes adds markdown blocks
-                cleaned_text = raw_text.strip()
-                if cleaned_text.startswith("```json"):
-                    cleaned_text = cleaned_text[7:]
-                if cleaned_text.endswith("```"):
-                    cleaned_text = cleaned_text[:-3]
-
-                start_index = cleaned_text.find("{")
-                end_index = cleaned_text.rfind("}") + 1
+                start_index = raw_text.find("{")
+                end_index = raw_text.rfind("}") + 1
                 if start_index != -1 and end_index != 0:
-                    json_string = cleaned_text[start_index:end_index]
+                    json_string = raw_text[start_index:end_index]
                     parsed_json = json.loads(json_string)
                     parsed_json["source_page"] = os.path.basename(image_path)
                     formatted_json = json.dumps(parsed_json, indent=4)
@@ -1060,7 +1052,7 @@ def run_inference(uploaded_files, text_input):
                 f'{{"error": "An unexpected error occurred during processing.", "details": "{str(e)}"}}'
             )
 
-        # Clean memory after every image to prevent OOM build up
+        # Clean memory after every image
         torch.cuda.empty_cache()
         gc.collect()
 
@@ -1151,7 +1143,7 @@ css = """
 """
 
 with gr.Blocks(theme=custom_theme, css=css) as demo:
-    gr.Markdown("# Sparrow Qwen2.5-VL-7B Vision AI 👁️")
+    gr.Markdown("# Sparrow Qwen2-VL-7B Vision AI 👁️")
     gr.Markdown(DESCRIPTION)
 
     with gr.Row():
