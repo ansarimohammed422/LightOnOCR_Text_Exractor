@@ -840,7 +840,6 @@
 # # demo.launch(debug=True, share=True)
 # if __name__ == "__main__":
 #     demo.launch(server_name="127.0.0.1", server_port=7860)
-
 import gc
 import json
 import os
@@ -860,7 +859,7 @@ from qwen_vl_utils import process_vision_info
 from transformers import (
     AutoProcessor,
     BitsAndBytesConfig,
-    Qwen2VLForConditionalGeneration,  # Back to Qwen2-VL class
+    Qwen2VLForConditionalGeneration,
 )
 
 
@@ -921,15 +920,16 @@ quantization_config = BitsAndBytesConfig(
 # --- 2. Initialize the Model and Processor with 4-bit Config ---
 print("Loading Qwen2-VL 4-bit quantized model...")
 model = Qwen2VLForConditionalGeneration.from_pretrained(
-    "Qwen/Qwen2-VL-7B-Instruct",  # Back to Qwen2-VL
+    "Qwen/Qwen2-VL-7B-Instruct",
     quantization_config=quantization_config,
     device_map="auto",
-    attn_implementation="flash_attention_2",  # Critical for memory saving
+    # --- CRITICAL FIX: Use 'eager' instead of 'flash_attention_2' ---
+    attn_implementation="eager",
+    # ----------------------------------------------------------------
 )
 print("Model loaded successfully on GPU.")
 
-# NOTE: I added max_pixels here. This is the main fix for your OOM error.
-# It ensures that even if your image is 1250x1750, the model won't create too many tokens.
+# NOTE: max_pixels is the critical fix for OOM (Out of Memory) errors.
 processor = AutoProcessor.from_pretrained(
     "Qwen/Qwen2-VL-7B-Instruct", min_pixels=256 * 28 * 28, max_pixels=1024 * 28 * 28
 )
