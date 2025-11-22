@@ -845,6 +845,10 @@ import json
 import os
 from datetime import datetime
 
+# --- MEMORY OPTIMIZATION SETTINGS (MUST BE AT THE TOP) ---
+# Helps prevent memory fragmentation errors on low-VRAM cards
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 import fitz  # PyMuPDF
 import gradio as gr
 import spaces
@@ -872,19 +876,26 @@ class CustomTheme(Base):
 
 custom_theme = CustomTheme()
 
-DESCRIPTION = "A powerful vision-language model that can understand images and text to provide detailed analysis."
+DESCRIPTION = "A powerful vision-language model (Optimized for 8GB VRAM)."
+
+# --- CRITICAL CONFIG FOR 8GB GPU ---
+# Reduced from 1250 to 768. This is the only way to fit in 8GB VRAM.
+MAX_IMAGE_SIZE = 768
+MAX_NEW_TOKENS = 1024  # Reduced from 2048 to save memory
 
 
-def array_to_image_path(image_filepath, max_width=1250, max_height=1750):
+def array_to_image_path(image_filepath):
     if image_filepath is None:
         raise ValueError("No image provided.")
 
     img = Image.open(image_filepath)
     width, height = img.size
-    if width > max_width or height > max_height:
-        img.thumbnail((max_width, max_height))
 
-    # Save to a temporary path to avoid overwriting originals or issues with Gradio file objects
+    # Aggressively resize to prevent OOM
+    if width > MAX_IMAGE_SIZE or height > MAX_IMAGE_SIZE:
+        img.thumbnail((MAX_IMAGE_SIZE, MAX_IMAGE_SIZE))
+
+    # Save to a temporary path
     base, ext = os.path.splitext(image_filepath)
     new_path = f"{base}_processed{ext}"
     img.save(new_path)
@@ -893,13 +904,14 @@ def array_to_image_path(image_filepath, max_width=1250, max_height=1750):
 
 
 def convert_pdf_to_images(pdf_path):
-    """Opens a PDF and converts each page into a high-resolution PNG image."""
+    """Opens a PDF and converts each page into a PNG image."""
     image_paths = []
     doc = fitz.open(pdf_path)
     base_name = os.path.splitext(os.path.basename(pdf_path))[0]
 
     for i, page in enumerate(doc):
-        pix = page.get_pixmap(dpi=200)
+        # Reduced DPI from 200 to 100 to save memory
+        pix = page.get_pixmap(dpi=100)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         image_path = f"{base_name}_page_{i + 1}_{timestamp}.png"
         pix.save(image_path)
@@ -917,27 +929,28 @@ quantization_config = BitsAndBytesConfig(
     bnb_4bit_use_double_quant=True,
 )
 
-# --- 2. Initialize the Model and Processor with 4-bit Config ---
+# --- 2. Initialize the Model ---
 print("Loading Qwen2-VL 4-bit quantized model...")
 model = Qwen2VLForConditionalGeneration.from_pretrained(
     "Qwen/Qwen2-VL-7B-Instruct",
     quantization_config=quantization_config,
     device_map="auto",
-    # --- CRITICAL FIX: Use 'eager' instead of 'flash_attention_2' ---
     attn_implementation="eager",
-    # ----------------------------------------------------------------
 )
-print("Model loaded successfully on GPU.")
+print("Model loaded successfully.")
 
-# NOTE: max_pixels is the critical fix for OOM (Out of Memory) errors.
+# --- 3. Strict Processor Limits ---
+# max_pixels limit ensures the model never sees an image too big for 8GB VRAM
 processor = AutoProcessor.from_pretrained(
-    "Qwen/Qwen2-VL-7B-Instruct", min_pixels=256 * 28 * 28, max_pixels=1024 * 28 * 28
+    "Qwen/Qwen2-VL-7B-Instruct",
+    min_pixels=256 * 28 * 28,
+    max_pixels=640 * 28 * 28,  # Capped at roughly 640x640 resolution internally
 )
 
 
 @spaces.GPU
 def run_inference(uploaded_files, text_input):
-    # CRITICAL: Clear memory before every run
+    # Aggressive cleanup
     torch.cuda.empty_cache()
     gc.collect()
 
@@ -946,18 +959,15 @@ def run_inference(uploaded_files, text_input):
 
     json_prompt = (
         f"{text_input}\n\nBased on the image and the query, respond ONLY with a single, "
-        "valid JSON object. This object should be well-structured, using nested objects "
-        "and arrays to logically represent the information."
+        "valid JSON object."
     )
 
     if not uploaded_files:
-        error_json = json.dumps(
-            {"error": "No file provided. Please upload an image or PDF."}, indent=4
-        )
-        return error_json, gr.Button(interactive=False)
+        return json.dumps({"error": "No file provided."}), gr.Button(interactive=False)
 
     image_paths_to_process = []
-    unsupported_files = []
+
+    # Process inputs
     for file_obj in uploaded_files:
         file_path = file_obj.name
         temp_files_to_clean.append(file_path)
@@ -970,23 +980,10 @@ def run_inference(uploaded_files, text_input):
             (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp")
         ):
             image_paths_to_process.append(file_path)
-        else:
-            unsupported_files.append(os.path.basename(file_path))
-
-    if unsupported_files:
-        unsupported_str = ", ".join(unsupported_files)
-        results.append(
-            json.dumps(
-                {
-                    "error": f"Unsupported file type(s) were ignored: {unsupported_str}",
-                    "details": "Please upload only images (PNG, JPG, etc.) or PDF files.",
-                },
-                indent=4,
-            )
-        )
 
     for image_file in image_paths_to_process:
         try:
+            # Resize image first
             image_path, width, height = array_to_image_path(image_file)
             if image_path != image_file:
                 temp_files_to_clean.append(image_path)
@@ -998,13 +995,14 @@ def run_inference(uploaded_files, text_input):
                         {
                             "type": "image",
                             "image": image_path,
-                            "resized_height": height,
-                            "resized_width": width,
+                            # Processor handles resizing via max_pixels,
+                            # we just pass the file path
                         },
                         {"type": "text", "text": json_prompt},
                     ],
                 }
             ]
+
             text = processor.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=True
             )
@@ -1018,7 +1016,9 @@ def run_inference(uploaded_files, text_input):
                 return_tensors="pt",
             ).to("cuda")
 
-            generated_ids = model.generate(**inputs, max_new_tokens=2048)
+            # Reduced max_new_tokens to prevent OOM during generation
+            generated_ids = model.generate(**inputs, max_new_tokens=MAX_NEW_TOKENS)
+
             generated_ids_trimmed = [
                 out_ids[len(in_ids) :]
                 for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
@@ -1030,6 +1030,7 @@ def run_inference(uploaded_files, text_input):
             )
             raw_text = raw_output[0]
 
+            # JSON Parsing Logic
             try:
                 start_index = raw_text.find("{")
                 end_index = raw_text.rfind("}") + 1
@@ -1041,27 +1042,27 @@ def run_inference(uploaded_files, text_input):
                     results.append(formatted_json)
                 else:
                     results.append(
-                        f'{{"error": "Model did not return valid JSON.", "source_page": "{os.path.basename(image_path)}", "raw_response": "{raw_text}"}}'
+                        f'{{"error": "No JSON found", "raw_response": "{raw_text}"}}'
                     )
             except json.JSONDecodeError:
                 results.append(
-                    f'{{"error": "Failed to decode JSON.", "source_page": "{os.path.basename(image_path)}", "raw_response": "{raw_text}"}}'
+                    f'{{"error": "JSON Decode Error", "raw_response": "{raw_text}"}}'
                 )
         except Exception as e:
-            results.append(
-                f'{{"error": "An unexpected error occurred during processing.", "details": "{str(e)}"}}'
-            )
+            results.append(f'{{"error": "Processing Error", "details": "{str(e)}"}}')
 
-        # Clean memory after every image
+        # Cleanup tensors immediately
+        del inputs, generated_ids, image_inputs
         torch.cuda.empty_cache()
         gc.collect()
 
+    # File cleanup
     for f in temp_files_to_clean:
         if os.path.exists(f):
             try:
                 os.remove(f)
-            except OSError as e:
-                print(f"Error deleting file {f}: {e}")
+            except:
+                pass
 
     final_json = "\n---\n".join(results)
     is_error = '"error":' in final_json
@@ -1070,14 +1071,15 @@ def run_inference(uploaded_files, text_input):
 
 @spaces.GPU
 def generate_explanation(json_text):
+    # Cleanup before starting explanation
+    torch.cuda.empty_cache()
+    gc.collect()
+
     if not json_text or '"error":' in json_text:
-        return "Cannot generate an explanation. Please produce a valid JSON output first. 🙁"
+        return "Cannot generate an explanation due to errors."
 
     explanation_prompt = (
-        "You are an expert data analyst. Your task is to provide a comprehensive, human-readable explanation "
-        "of the following JSON data, which may represent one or more pages from a document. First, provide a textual explanation. "
-        "If the JSON contains data from multiple sources (pages), explain each one. Then, if the JSON data represents a table, "
-        "a list of items, or a receipt, you **must** re-format the key information into a Markdown table for clarity.\n\n"
+        "Explain this JSON data simply. Format tables in Markdown.\n\n"
         f"JSON Data:\n```json\n{json_text}\n```"
     )
 
@@ -1087,7 +1089,7 @@ def generate_explanation(json_text):
     )
     inputs = processor(text=[text], return_tensors="pt").to("cuda")
 
-    generated_ids = model.generate(**inputs, max_new_tokens=2048)
+    generated_ids = model.generate(**inputs, max_new_tokens=MAX_NEW_TOKENS)
     generated_ids_trimmed = [
         out_ids[len(in_ids) :]
         for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
@@ -1104,91 +1106,46 @@ def generate_explanation(json_text):
 # Define the Gradio UI
 css = """
   .gradio-container { font-family: 'IBM Plex Sans', sans-serif; }
-
-  /* Default (Light Mode) Styles */
-  #output-code, #output-code pre, #output-code code {
-    background-color: #f0f0f0;
-    border: 1px solid #e0e0e0;
-    border-radius: 7px;
-    color: #333;
-  }
-  #output-code .token.punctuation { color: #393a34; }
-  #output-code .token.property, #output-code .token.string { color: #0b7500; }
-  #output-code .token.number { color: #2973b7; }
-  #output-code .token.boolean { color: #9a050f; }
-
-  #explanation-box {
-    min-height: 200px;
-    border: 1px solid #e0e0e0;
-    padding: 15px;
-    border-radius: 7px;
-  }
-
-  /* Dark Mode Overrides targeting Gradio's .dark class */
-  .dark #output-code, .dark #output-code pre, .dark #output-code code {
-    background-color: #2b2b2b !important;
-    border: 1px solid #444 !important;
-    color: #f0f0f0 !important;
-  }
-  .dark #explanation-box {
-    border: 1px solid #444 !important;
-  }
-  .dark #output-code code span {
-     color: #f0f0f0 !important;
-  }
-  .dark #output-code .token.punctuation { color: #ccc !important; }
-  .dark #output-code .token.property, .dark #output-code .token.string { color: #90ee90 !important; }
-  .dark #output-code .token.number { color: #add8e6 !important; }
-  .dark #output-code .token.boolean { color: #f08080 !important; }
+  #output-code { background-color: #f0f0f0; border-radius: 7px; }
 """
 
 with gr.Blocks(theme=custom_theme, css=css) as demo:
-    gr.Markdown("# Sparrow Qwen2-VL-7B Vision AI 👁️")
+    gr.Markdown("# Sparrow Qwen2-VL-7B (Low Memory Mode)")
     gr.Markdown(DESCRIPTION)
 
     with gr.Row():
         with gr.Column(scale=1):
-            # input_files = gr.Files(label="Upload Images or PDFs")
             input_files = gr.Files(
                 label="Upload Images or PDFs",
                 file_types=["image", ".pdf", ".png", ".jpg", ".jpeg", ".webp"],
             )
             text_input = gr.Textbox(
                 label="Your Query",
-                placeholder="e.g., Extract the total amount from this receipt.",
+                placeholder="e.g., Extract total amount",
             )
-            submit_btn = gr.Button("Analyze File(s)", variant="primary")
+            submit_btn = gr.Button("Analyze", variant="primary")
 
         with gr.Column(scale=2):
             output_text = gr.Code(
-                label="Full JSON Response",
+                label="JSON Response",
                 language="json",
                 elem_id="output-code",
                 interactive=False,
             )
-            explanation_btn = gr.Button(
-                "📄 Generate Detailed Explanation", interactive=False
-            )
-            explanation_output = gr.Markdown(
-                label="Detailed Explanation", elem_id="explanation-box"
-            )
+            explanation_btn = gr.Button("Generate Explanation", interactive=False)
+            explanation_output = gr.Markdown(label="Explanation")
 
     submit_btn.click(
         fn=run_inference,
         inputs=[input_files, text_input],
         outputs=[output_text, explanation_btn],
-        api_name="analyze_document",
     )
 
     explanation_btn.click(
         fn=generate_explanation,
         inputs=[output_text],
         outputs=[explanation_output],
-        show_progress="full",
-        api_name="generate_explanation",
     )
 
-demo.queue()
-# demo.launch(debug=True, share=True)
 if __name__ == "__main__":
     demo.launch(server_name="127.0.0.1", server_port=7860)
